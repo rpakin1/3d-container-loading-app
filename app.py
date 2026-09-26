@@ -275,3 +275,32 @@ with col_legend:
             f'</div>', 
             unsafe_allow_html=True
         )
+
+
+import streamlit as st
+
+# สร้าง Tab สลับหน้าการทำงานระหว่าง User และ Admin
+tab_user, tab_admin = st.tabs(["🚛 หน้าผู้ใช้งาน (Loading App)", "⚙️ หน้า Admin (Master Data)"])
+
+with tab_user:
+    # โค้ดส่วนคำนวณและแสดงผล 3D เดิมจะถูกวางไว้ตรงนี้
+    pass
+
+with tab_admin:
+    st.header("⚙️ ระบบจัดการข้อมูล Master Data (Admin Only)")
+    
+    # ระบบล็อกอินเข้าหน้า Admin แบบง่าย
+    admin_password = st.text_input("กรอกรหัสผ่าน Admin:", type="password")
+    if admin_password == "admin1234": # กำหนดรหัสผ่าน
+        st.success("เข้าสู่ระบบ Admin เรียบร้อยแล้ว")
+        
+        st.subheader("1. ตารางข้อมูลตู้คอนเทนเนอร์ (Container Master)")
+        # แสดงตารางให้ Admin แก้ไข/เพิ่มข้อมูลได้บนหน้าเว็บ
+        edited_container_df = st.data_editor(df_container, num_rows="dynamic", key="edit_container")
+        
+        st.subheader("2. ตารางข้อมูลกล่องสินค้า (Box Master)")
+        edited_box_df = st.data_editor(df_box, num_rows="dynamic", key="edit_box")
+        
+        st.info("💡 หมายเหตุ: การแก้ไขข้อมูลบนหน้าเว็บ Streamlit โดยตรงนี้ หากต้องการให้เซฟกลับไปที่ Google Sheets ถาวร จำเป็นต้องเปิดใช้ Google Sheets API (gspread) เพิ่มเติมครับ")
+    else:
+        st.warning("กรุณากรอกรหัสผ่าน Admin เพื่อจัดการข้อมูล")
