@@ -6,13 +6,13 @@ import plotly.graph_objects as go
 # 1. PAGE CONFIGURATION
 # ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="3D Container Loading & LDD System",
+    page_title="3D Container Loading System",
     page_icon="📦",
     layout="wide"
 )
 
 # ------------------------------------------------------------------------------
-# 2. DYNAMIC COLOR GENERATOR (ไม่ต้องมีคอลัมน์ Color ใน Google Sheet)
+# 2. DYNAMIC COLOR GENERATOR
 # ------------------------------------------------------------------------------
 COLOR_PALETTE = [
     '#FF5733', '#33FF57', '#3380FF', '#FF33A8', '#33FFF3', 
@@ -21,7 +21,6 @@ COLOR_PALETTE = [
 ]
 
 def assign_box_colors(df_box):
-    """สร้าง Mapping สีประจำรหัสกล่อง (Box_ID) อัตโนมัติจาก Palette"""
     box_colors = {}
     if not df_box.empty and 'Box_ID' in df_box.columns:
         for idx, row in df_box.iterrows():
@@ -31,7 +30,7 @@ def assign_box_colors(df_box):
     return box_colors
 
 # ------------------------------------------------------------------------------
-# 3. DATA CLASSES & CORE DBL ALGORITHM (WITH LBS_Z CHECK)
+# 3. DATA CLASSES & CORE DBL ALGORITHM
 # ------------------------------------------------------------------------------
 class EmptySpace:
     def __init__(self, x1, y1, z1, x2, y2, z2):
@@ -53,7 +52,6 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
     box_info_dict = {item['info']['Box_ID']: item['info'] for item in user_box_orders}
 
     while space_list and any(qty > 0 for qty in boxes_in_stock.values()):
-        # กฎ DBL: Min X1 (ติดในสุด) -> Min Z1 (ติดพื้น) -> Min Y1 (ชิดซ้าย)
         space_list.sort(key=lambda s: (s.x1, s.z1, s.y1))
         space = space_list.pop(0)
 
@@ -87,12 +85,12 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
                 eje_z = min(int(space.height // bh), int(qty_left // (eje_x * eje_y)))
                 if eje_z == 0: continue
 
-                # ตรวจสอบขีดจำกัดแรงกดทับ LBS_z (ถ้ามี)
+                # ตรวจสอบขีดจำกัดแรงกดทับ LBS_z
                 lbs_z_limit = box.get('LBS_z', float('inf'))
                 if lbs_z_limit and lbs_z_limit > 0:
                     unit_weight = box.get('Weight_kg', 0)
                     while eje_z > 1 and ((eje_z - 1) * unit_weight) > lbs_z_limit:
-                        eje_z -= 1 # ลดจำนวนชั้นลงถ้าน้ำหนักทับเกิน LBS_z
+                        eje_z -= 1
 
                 fit_x = space.width - (bw * eje_x)
                 fit_y = space.length - (bl * eje_y)
@@ -126,8 +124,12 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
                         z1 = space.z1 + (z_i * bp['bh'])
                         
                         placed_boxes.append({
+                            'Box_ID': bp['box_id'],
+                            'Box_Name': b_info['Box_Name'],
+                            'Customer_Name': b_info['Customer_Name'],
                             'x1': x1, 'y1': y1, 'z1': z1,
                             'x2': x1 + bp['bw'], 'y2': y1 + bp['bl'], 'z2': z1 + bp['bh'],
+                            'Width_cm': bp['bw'], 'Length_cm': bp['bl'], 'Height_cm': bp['bh'],
                             'weight_kg': b_info.get('Weight_kg', 0),
                             'color': box_color,
                             'label': f"{b_info['Box_Name']} | {b_info['Customer_Name']}"
@@ -142,7 +144,22 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
             if space.z1 + block_h < space.z2:
                 space_list.append(EmptySpace(space.x1, space.y1, space.z1 + block_h, space.x1 + block_w, space.y1 + block_l, space.z2))
 
-    return placed_boxes
+    # สรุปกล่องที่เหลือวางไม่ได้
+    unfitted_boxes = []
+    for item in user_box_orders:
+        b_id = item['info']['Box_ID']
+        leftover = boxes_in_stock[b_id]
+        if leftover > 0:
+            unfitted_boxes.append({
+                'Box_ID': b_id,
+                'Box_Name': item['info']['Box_Name'],
+                'Customer_Name': item['info']['Customer_Name'],
+                'Requested_Qty': item['qty'],
+                'Unfitted_Qty': leftover,
+                'Unit_Weight_kg': item['info'].get('Weight_kg', 0)
+            })
+
+    return placed_boxes, unfitted_boxes
 
 # ------------------------------------------------------------------------------
 # 4. LDD CALCULATION FUNCTION
@@ -197,7 +214,6 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
     fig = go.Figure()
     cw, cl, ch = container['Width_cm'], container['Length_cm'], container['Height_cm']
 
-    # โครงตู้ Wireframe
     fig.add_trace(go.Scatter3d(
         x=[0, cw, cw, 0, 0, 0, cw, cw, 0, 0, cw, cw, cw, cw, 0, 0],
         y=[0, 0, cl, cl, 0, 0, 0, cl, cl, 0, 0, 0, cl, cl, cl, cl],
@@ -206,7 +222,6 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
         name=f"ตู้ {container['Container_Name']}"
     ))
 
-    # วาดกล่อง
     for b in placed_boxes:
         mesh = create_3d_cube_mesh(
             b['x1'], b['y1'], b['z1'], b['x2'], b['y2'], b['z2'],
@@ -214,7 +229,6 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
         )
         fig.add_trace(mesh)
 
-    # จุด CG
     if placed_boxes:
         fig.add_trace(go.Scatter3d(
             x=[cg_x], y=[cg_y], z=[ch / 2],
@@ -234,7 +248,7 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
     return fig
 
 # ------------------------------------------------------------------------------
-# 6. READ DATA FROM GOOGLE SHEETS
+# 6. READ MASTER DATA
 # ------------------------------------------------------------------------------
 CONTAINER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=0&single=true&output=csv"
 BOX_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=1420125949&single=true&output=csv"
@@ -271,49 +285,55 @@ df_container, df_box = load_master_data()
 box_colors_map = assign_box_colors(df_box)
 
 # ------------------------------------------------------------------------------
-# 7. APP MAIN INTERFACE (TABS)
+# 7. APP MAIN INTERFACE (3 TABS)
 # ------------------------------------------------------------------------------
-tab_user, tab_admin = st.tabs(["🚛 หน้าผู้ใช้งาน (3D Loading & LDD)", "⚙️ หน้า Admin (Master Data)"])
+tab_user, tab_reports, tab_admin = st.tabs([
+    "🚛 หน้าผู้ใช้งาน (3D Loading & LDD)", 
+    "📊 รายงานและส่งออกข้อมูล (Export CSV)", 
+    "⚙️ หน้า Admin (Master Data)"
+])
 
-# --- TAB 1: USER SIMULATION ---
+# Global variables for calculation results
+placed_boxes, unfitted_boxes = [], []
+container_info = None
+
+# --- SIDEBAR INPUTS ---
+st.sidebar.header("📋 เมนูเลือกตู้และสินค้า")
+if st.sidebar.button("🔄 อัปเดตข้อมูลจาก Google Sheet", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+selected_container_name = st.sidebar.selectbox("เลือกประเภทตู้คอนเทนเนอร์:", df_container['Container_Name'].unique())
+container_info = df_container[df_container['Container_Name'] == selected_container_name].iloc[0]
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("ระบุจำนวนกล่อง")
+
+user_box_orders = []
+for _, box in df_box.iterrows():
+    label = f"{box['Box_Name']} [{box['Customer_Name']}]"
+    qty = st.sidebar.number_input(label, min_value=0, value=20, step=1)
+    if qty > 0:
+        user_box_orders.append({'info': box, 'qty': qty})
+
+# Process DBL & LDD
+placed_boxes, unfitted_boxes = run_dbl_algorithm(container_info, user_box_orders, box_colors_map)
+tot_w, cg_x, cg_y, f_axle, r_axle, f_limit, r_limit, ldd_pass = calculate_ldd(placed_boxes, container_info)
+
+# --- TAB 1: 3D LOADING & LDD ---
 with tab_user:
     st.title("📦 3D Container Loading & LDD Analysis")
 
-    st.sidebar.header("📋 เมนูเลือกตู้และสินค้า")
-    
-    # ปุ่มกด Refresh ดึงข้อมูลใหม่จาก Google Sheets ทันที
-    if st.sidebar.button("🔄 อัปเดตข้อมูลจาก Google Sheet", use_container_width=True, type="secondary"):
-        st.cache_data.clear()
-        st.rerun()
-
-    selected_container_name = st.sidebar.selectbox("เลือกประเภทตู้คอนเทนเนอร์:", df_container['Container_Name'].unique())
-    container_info = df_container[df_container['Container_Name'] == selected_container_name].iloc[0]
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("ระบุจำนวนกล่อง")
-
-    user_box_orders = []
-    for _, box in df_box.iterrows():
-        label = f"{box['Box_Name']} [{box['Customer_Name']}]"
-        qty = st.sidebar.number_input(label, min_value=0, value=20, step=1)
-        if qty > 0:
-            user_box_orders.append({'info': box, 'qty': qty})
-
-    # รัน DBL Algorithm & LDD
-    placed_boxes = run_dbl_algorithm(container_info, user_box_orders, box_colors_map)
-    tot_w, cg_x, cg_y, f_axle, r_axle, f_limit, r_limit, ldd_pass = calculate_ldd(placed_boxes, container_info)
-
-    # คำนวณ % Utilizations
     container_vol = container_info['Width_cm'] * container_info['Length_cm'] * container_info['Height_cm']
     used_vol = sum((b['x2']-b['x1'])*(b['y2']-b['y1'])*(b['z2']-b['z1']) for b in placed_boxes)
     vol_utilization = (used_vol / container_vol) * 100 if container_vol > 0 else 0
     weight_utilization = (tot_w / container_info['Max_Weight_kg']) * 100 if container_info['Max_Weight_kg'] > 0 else 0
 
-    # Display Metrics Dashboard
+    # Dashboard Metrics (ปรับการแสดงผลน้ำหนักให้กระชับ เพื่อไม่ให้ข้อความยาวจนโดนตัด)
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("📦 Volume Utilization", f"{vol_utilization:.2f} %")
-    m2.metric("⚖️ Total Weight", f"{tot_w:,.1f} / {container_info['Max_Weight_kg']:,.0f} kg", f"{weight_utilization:.1f}%")
-    m3.metric("🎯 จุด CG สะสม (X, Y)", f"{cg_x:.0f}, {cg_y:.0f} cm")
+    m1.metric("📦 Volume Util.", f"{vol_utilization:.2f} %")
+    m2.metric("⚖️ Total Weight", f"{tot_w:,.1f} kg", f"พิกัด {container_info['Max_Weight_kg']:,.0f} kg ({weight_utilization:.1f}%)")
+    m3.metric("🎯 จุด CG (X, Y)", f"{cg_x:.0f}, {cg_y:.0f} cm")
     m4.metric("🚛 LDD Status", "✅ ปลอดภัย" if ldd_pass else "⚠️ Overload")
 
     st.markdown("### 🚛 น้ำหนักกดลงเพลารถ (Load Distribution Diagram)")
@@ -348,7 +368,51 @@ with tab_user:
                 f'</div>', unsafe_allow_html=True
             )
 
-# --- TAB 2: ADMIN MANAGEMENT ---
+# --- TAB 2: REPORTS & EXPORT CSV ---
+with tab_reports:
+    st.title("📊 รายงานสรุปการจัดวางและส่งออกข้อมูล (CSV)")
+
+    # Section 1: รายการกล่องที่ยัดไม่ลงตู้
+    st.subheader("⚠️ 1. รายการกล่องที่ไม่สามารถใส่ลงตู้ได้ (Unfitted Boxes)")
+    if unfitted_boxes:
+        df_unfitted = pd.DataFrame(unfitted_boxes)
+        st.warning(f"พบกล่องตกค้างทั้งหมด {sum(b['Unfitted_Qty'] for b in unfitted_boxes)} ใบ")
+        st.dataframe(df_unfitted, use_container_width=True)
+        
+        # ปุ่มดาวน์โหลด CSV กล่องตกค้าง
+        csv_unfitted = df_unfitted.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 ดาวน์โหลดรายการกล่องตกค้าง (CSV)",
+            data=csv_unfitted,
+            file_name="unfitted_boxes_report.csv",
+            mime="text/csv"
+        )
+    else:
+        st.success("🎉 สินค้าทั้งหมดสามารถจัดวางลงในตู้ได้ครบถ้วน!")
+
+    st.markdown("---")
+
+    # Section 2: รายการตำแหน่งพิกัดของกล่องแต่ละใบในตู้
+    st.subheader("📍 2. รายการตำแหน่งพิกัด 3D ของกล่องในตู้ (Placed Boxes Positions)")
+    if placed_boxes:
+        df_placed = pd.DataFrame(placed_boxes)
+        # จัดลำดับคอลัมน์ให้ดูง่าย
+        display_cols = ['Box_ID', 'Box_Name', 'Customer_Name', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2', 'Width_cm', 'Length_cm', 'Height_cm', 'weight_kg']
+        df_placed_display = df_placed[display_cols]
+        
+        st.write(f"จำนวนกล่องที่บรรจุได้สำเร็จ: **{len(placed_boxes)}** ใบ")
+        st.dataframe(df_placed_display, use_container_width=True)
+
+        # ปุ่มดาวน์โหลด CSV รายการพิกัดกล่อง
+        csv_placed = df_placed_display.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 ดาวน์โหลดพิกัดการจัดวางตู้ 3D (CSV)",
+            data=csv_placed,
+            file_name="placed_boxes_positions.csv",
+            mime="text/csv"
+        )
+
+# --- TAB 3: ADMIN MANAGEMENT ---
 with tab_admin:
     st.title("⚙️ ระบบจัดการ Master Data (Admin)")
     admin_pwd = st.text_input("กรอกรหัสผ่าน Admin:", type="password")
