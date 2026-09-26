@@ -17,8 +17,8 @@ st.markdown("ระบบคำนวณและแสดงผลการจ�
 # ------------------------------------------------------------------------------
 # 2. READ DATA FROM GOOGLE SHEETS
 # ------------------------------------------------------------------------------
-CONTAINER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/YOUR_CONTAINER_PUBLISHED_ID/pub?gid=0&single=true&output=csv"
-BOX_CSV_URL = "https://docs.google.com/spreadsheets/d/e/YOUR_BOX_PUBLISHED_ID/pub?gid=12345&single=true&output=csv"
+CONTAINER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=0&single=true&output=csv"
+BOX_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=1420125949&single=true&output=csv"
 
 @st.cache_data(ttl=60)
 def load_sheet_data():
