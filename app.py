@@ -30,7 +30,7 @@ def assign_box_colors(df_box):
     return box_colors
 
 # ------------------------------------------------------------------------------
-# 3. DATA CLASSES & CORE DBL ALGORITHM
+# 3. CORE DBL PACKING ALGORITHM
 # ------------------------------------------------------------------------------
 class EmptySpace:
     def __init__(self, x1, y1, z1, x2, y2, z2):
@@ -85,7 +85,6 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
                 eje_z = min(int(space.height // bh), int(qty_left // (eje_x * eje_y)))
                 if eje_z == 0: continue
 
-                # ตรวจสอบขีดจำกัดแรงกดทับ LBS_z
                 lbs_z_limit = box.get('LBS_z', float('inf'))
                 if lbs_z_limit and lbs_z_limit > 0:
                     unit_weight = box.get('Weight_kg', 0)
@@ -144,7 +143,6 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
             if space.z1 + block_h < space.z2:
                 space_list.append(EmptySpace(space.x1, space.y1, space.z1 + block_h, space.x1 + block_w, space.y1 + block_l, space.z2))
 
-    # สรุปกล่องที่เหลือวางไม่ได้
     unfitted_boxes = []
     for item in user_box_orders:
         b_id = item['info']['Box_ID']
@@ -248,12 +246,12 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
     return fig
 
 # ------------------------------------------------------------------------------
-# 6. READ MASTER DATA
+# 6. READ MASTER DATA FROM GOOGLE SHEETS
 # ------------------------------------------------------------------------------
-CONTAINER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=0&single=true&output=csv"
-BOX_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=1420125949&single=true&output=csv"
+CONTAINER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/YOUR_CONTAINER_PUBLISHED_ID/pub?gid=0&single=true&output=csv"
+BOX_CSV_URL = "https://docs.google.com/spreadsheets/d/e/YOUR_BOX_PUBLISHED_ID/pub?gid=12345&single=true&output=csv"
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=5) # ลดเวลา TTL เหลือ 5 วินาทีเพื่อให้ดึงข้อมูลใหม่เร็วขึ้น
 def load_master_data():
     try:
         df_c = pd.read_csv(CONTAINER_CSV_URL)
@@ -293,14 +291,13 @@ tab_user, tab_reports, tab_admin = st.tabs([
     "⚙️ หน้า Admin (Master Data)"
 ])
 
-# Global variables for calculation results
-placed_boxes, unfitted_boxes = [], []
-container_info = None
-
 # --- SIDEBAR INPUTS ---
 st.sidebar.header("📋 เมนูเลือกตู้และสินค้า")
-if st.sidebar.button("🔄 อัปเดตข้อมูลจาก Google Sheet", use_container_width=True):
-    st.cache_data.clear()
+
+# ปุ่มกด Refresh บังคับล้าง Cache และโหลดใหม่ทันที
+if st.sidebar.button("🔄 อัปเดตข้อมูลจาก Google Sheet", use_container_width=True, type="primary"):
+    load_master_data.clear() # บังคับล้าง Cache ของฟังก์ชันอ่านข้อมูล
+    st.cache_data.clear()    # ล้าง Cache ทั้งหมดของ Streamlit
     st.rerun()
 
 selected_container_name = st.sidebar.selectbox("เลือกประเภทตู้คอนเทนเนอร์:", df_container['Container_Name'].unique())
@@ -329,10 +326,9 @@ with tab_user:
     vol_utilization = (used_vol / container_vol) * 100 if container_vol > 0 else 0
     weight_utilization = (tot_w / container_info['Max_Weight_kg']) * 100 if container_info['Max_Weight_kg'] > 0 else 0
 
-    # Dashboard Metrics (ปรับการแสดงผลน้ำหนักให้กระชับ เพื่อไม่ให้ข้อความยาวจนโดนตัด)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("📦 Volume Util.", f"{vol_utilization:.2f} %")
-    m2.metric("⚖️ Total Weight", f"{tot_w:,.1f} kg", f"พิกัด {container_info['Max_Weight_kg']:,.0f} kg ({weight_utilization:.1f}%)")
+    m2.metric("秤 Total Weight", f"{tot_w:,.1f} kg", f"พิกัด {container_info['Max_Weight_kg']:,.0f} kg ({weight_utilization:.1f}%)")
     m3.metric("🎯 จุด CG (X, Y)", f"{cg_x:.0f}, {cg_y:.0f} cm")
     m4.metric("🚛 LDD Status", "✅ ปลอดภัย" if ldd_pass else "⚠️ Overload")
 
@@ -372,14 +368,12 @@ with tab_user:
 with tab_reports:
     st.title("📊 รายงานสรุปการจัดวางและส่งออกข้อมูล (CSV)")
 
-    # Section 1: รายการกล่องที่ยัดไม่ลงตู้
     st.subheader("⚠️ 1. รายการกล่องที่ไม่สามารถใส่ลงตู้ได้ (Unfitted Boxes)")
     if unfitted_boxes:
         df_unfitted = pd.DataFrame(unfitted_boxes)
         st.warning(f"พบกล่องตกค้างทั้งหมด {sum(b['Unfitted_Qty'] for b in unfitted_boxes)} ใบ")
         st.dataframe(df_unfitted, use_container_width=True)
         
-        # ปุ่มดาวน์โหลด CSV กล่องตกค้าง
         csv_unfitted = df_unfitted.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 ดาวน์โหลดรายการกล่องตกค้าง (CSV)",
@@ -392,18 +386,15 @@ with tab_reports:
 
     st.markdown("---")
 
-    # Section 2: รายการตำแหน่งพิกัดของกล่องแต่ละใบในตู้
     st.subheader("📍 2. รายการตำแหน่งพิกัด 3D ของกล่องในตู้ (Placed Boxes Positions)")
     if placed_boxes:
         df_placed = pd.DataFrame(placed_boxes)
-        # จัดลำดับคอลัมน์ให้ดูง่าย
         display_cols = ['Box_ID', 'Box_Name', 'Customer_Name', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2', 'Width_cm', 'Length_cm', 'Height_cm', 'weight_kg']
         df_placed_display = df_placed[display_cols]
         
         st.write(f"จำนวนกล่องที่บรรจุได้สำเร็จ: **{len(placed_boxes)}** ใบ")
         st.dataframe(df_placed_display, use_container_width=True)
 
-        # ปุ่มดาวน์โหลด CSV รายการพิกัดกล่อง
         csv_placed = df_placed_display.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             label="📥 ดาวน์โหลดพิกัดการจัดวางตู้ 3D (CSV)",
@@ -412,16 +403,15 @@ with tab_reports:
             mime="text/csv"
         )
 
-# --- TAB 3: ADMIN MANAGEMENT ---
+# --- TAB 3: ADMIN MANAGEMENT (READ-ONLY WITHOUT PASSWORD) ---
 with tab_admin:
-    st.title("⚙️ ระบบจัดการ Master Data (Admin)")
-    admin_pwd = st.text_input("กรอกรหัสผ่าน Admin:", type="password")
-    if admin_pwd == "admin1234":
-        st.success("เข้าสู่ระบบ Admin สำเร็จ")
-        st.subheader("1. จัดการข้อมูลตู้คอนเทนเนอร์ (Container Master)")
-        st.data_editor(df_container, num_rows="dynamic", key="edit_c", use_container_width=True)
-        
-        st.subheader("2. จัดการข้อมูลกล่องสินค้า (Box Master)")
-        st.data_editor(df_box, num_rows="dynamic", key="edit_b", use_container_width=True)
-    else:
-        st.info("กรุณากรอกรหัสผ่านเพื่อแก้ไขข้อมูล Master Data")
+    st.title("⚙️ ข้อมูล Master Data ที่อ่านได้จาก Google Sheets")
+    st.caption("หน้านี้แสดงค่าตัวเลขจริงที่อ่านมาจาก Google Sheets แบบ Real-time (ไม่ต้องใช้รหัสผ่าน)")
+
+    st.subheader("1. ตารางข้อมูลตู้คอนเทนเนอร์ (Container Master Table)")
+    st.dataframe(df_container, use_container_width=True)
+    
+    st.subheader("2. ตารางข้อมูลกล่องสินค้า (Box Master Table)")
+    st.dataframe(df_box, use_container_width=True)
+
+    st.info("💡 หากมีการแก้ไขค่าใน Google Sheet ให้กดปุ่ม **'🔄 อัปเดตข้อมูลจาก Google Sheet'** ที่แถบเมนูด้านซ้ายเพื่ออ่านค่าใหม่")
