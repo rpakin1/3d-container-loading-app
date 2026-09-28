@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import math
 
 # ------------------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -30,28 +31,32 @@ def assign_box_colors(df_box):
     return box_colors
 
 # ------------------------------------------------------------------------------
-# 3. CORE DBL PACKING ALGORITHM
+# 3. CORE DBL ALGORITHM (EXACT VB MODULE 3 LOGIC)
 # ------------------------------------------------------------------------------
 class EmptySpace:
-    def __init__(self, x1, y1, z1, x2, y2, z2):
+    def __init__(self, x1, y1, z1, x2, y2, z2, lbs_z_limit=float('inf')):
         self.x1, self.y1, self.z1 = x1, y1, z1
         self.x2, self.y2, self.z2 = x2, y2, z2
         self.width = x2 - x1
         self.length = y2 - y1
         self.height = z2 - z1
+        self.lbs_z = lbs_z_limit  # Maximum weight capacity supported on this space
 
 def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
     cw = container_info['Width_cm']
     cl = container_info['Length_cm']
     ch = container_info['Height_cm']
+    max_c_weight = container_info.get('Max_Weight_kg', 28000)
 
-    space_list = [EmptySpace(0, 0, 0, cw, cl, ch)]
+    # Initial space supports up to the max payload of the container
+    space_list = [EmptySpace(0, 0, 0, cw, cl, ch, lbs_z_limit=max_c_weight)]
     placed_boxes = []
 
     boxes_in_stock = {item['info']['Box_ID']: item['qty'] for item in user_box_orders}
     box_info_dict = {item['info']['Box_ID']: item['info'] for item in user_box_orders}
 
     while space_list and any(qty > 0 for qty in boxes_in_stock.values()):
+        # VB Logic: Seleccionar_Espacio (Min X1 -> Min Z1 -> Min Y1)
         space_list.sort(key=lambda s: (s.x1, s.z1, s.y1))
         space = space_list.pop(0)
 
@@ -63,7 +68,15 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
                 continue
             
             box = box_info_dict[box_id]
+            unit_weight = float(box.get('Weight_kg', 0))
             
+            # Fetch LBS_z from Google Sheets dataframe
+            raw_lbs = box.get('LBS_z', box.get('lbs_z', float('inf')))
+            try:
+                lbs_z_total = float(raw_lbs) if pd.notna(raw_lbs) and str(raw_lbs).strip() != '' else float('inf')
+            except ValueError:
+                lbs_z_total = float('inf')
+
             rotations = [
                 (box['Width_cm'], box['Length_cm'], box['Height_cm'], 1),
                 (box['Length_cm'], box['Width_cm'], box['Height_cm'], 2) if box.get('Allow_Z', 1) else None,
@@ -76,21 +89,40 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
             for rot in filter(None, rotations):
                 bw, bl, bh, rot_id = rot
 
-                eje_x = min(int(space.width // bw), qty_left)
+                max_x_fit = int(space.width // bw)
+                max_y_fit = int(space.length // bl)
+                max_z_fit = int(space.height // bh)
+
+                if max_x_fit == 0 or max_y_fit == 0 or max_z_fit == 0:
+                    continue
+
+                # --------------------------------------------------------------
+                # WEIGHT VALIDATION (VB MODULE 3)
+                # --------------------------------------------------------------
+                # If box weight exceeds space weight capacity, skip this placement
+                if unit_weight > 0 and unit_weight > space.lbs_z:
+                    continue
+
+                eje_x = min(max_x_fit, qty_left)
                 if eje_x == 0: continue
                 
-                eje_y = min(int(space.length // bl), int(qty_left // eje_x))
+                eje_y = min(max_y_fit, int(qty_left // eje_x))
                 if eje_y == 0: continue
+
+                # Calculate EjeZ using WorksheetFunction.Min from VB
+                limit_by_height = max_z_fit
+                limit_by_qty = int(qty_left // (eje_x * eje_y))
                 
-                eje_z = min(int(space.height // bh), int(qty_left // (eje_x * eje_y)))
+                if lbs_z_total > 0 and lbs_z_total < float('inf') and unit_weight > 0:
+                    max_allowed_stack = math.floor(lbs_z_total / unit_weight)
+                    limit_by_lbs = max(1, max_allowed_stack)
+                else:
+                    limit_by_lbs = float('inf')
+
+                eje_z = min(limit_by_height, limit_by_qty, limit_by_lbs)
                 if eje_z == 0: continue
 
-                lbs_z_limit = box.get('LBS_z', float('inf'))
-                if lbs_z_limit and lbs_z_limit > 0:
-                    unit_weight = box.get('Weight_kg', 0)
-                    while eje_z > 1 and ((eje_z - 1) * unit_weight) > lbs_z_limit:
-                        eje_z -= 1
-
+                # Fit Total = Remaining waste space
                 fit_x = space.width - (bw * eje_x)
                 fit_y = space.length - (bl * eje_y)
                 fit_z = space.height - (bh * eje_z)
@@ -103,7 +135,9 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
                         'box_info': box,
                         'bw': bw, 'bl': bl, 'bh': bh,
                         'eje_x': eje_x, 'eje_y': eje_y, 'eje_z': eje_z,
-                        'total_items': eje_x * eje_y * eje_z
+                        'total_items': eje_x * eje_y * eje_z,
+                        'lbs_z_total': lbs_z_total,
+                        'unit_weight': unit_weight
                     }
 
         if best_placement:
@@ -136,12 +170,23 @@ def run_dbl_algorithm(container_info, user_box_orders, box_colors_map):
 
             boxes_in_stock[bp['box_id']] -= bp['total_items']
 
+            # ------------------------------------------------------------------
+            # SPACE SPLITTING LOGIC (actualizar_espacios - VB Module 3)
+            # ------------------------------------------------------------------
+            # Space B: Right
             if space.x1 + block_w < space.x2:
-                space_list.append(EmptySpace(space.x1 + block_w, space.y1, space.z1, space.x2, space.y2, space.z2))
+                space_list.append(EmptySpace(space.x1 + block_w, space.y1, space.z1, space.x2, space.y2, space.z2, space.lbs_z))
+            
+            # Space D: Back
             if space.y1 + block_l < space.y2:
-                space_list.append(EmptySpace(space.x1, space.y1 + block_l, space.z1, space.x1 + block_w, space.y2, space.z2))
+                space_list.append(EmptySpace(space.x1, space.y1 + block_l, space.z1, space.x1 + block_w, space.y2, space.z2, space.lbs_z))
+            
+            # Space C: Upper
+            # VB Logic: c.LBSz = Min(espacio_disponible.LBSz - item.Peso, item.LBSz)
             if space.z1 + block_h < space.z2:
-                space_list.append(EmptySpace(space.x1, space.y1, space.z1 + block_h, space.x1 + block_w, space.y1 + block_l, space.z2))
+                upper_space_lbs = min(space.lbs_z - (bp['unit_weight'] * bp['eje_z']), bp['lbs_z_total'])
+                if upper_space_lbs > 0:
+                    space_list.append(EmptySpace(space.x1, space.y1, space.z1 + block_h, space.x1 + block_w, space.y1 + block_l, space.z2, upper_space_lbs))
 
     unfitted_boxes = []
     for item in user_box_orders:
@@ -217,7 +262,7 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
         y=[0, 0, cl, cl, 0, 0, 0, cl, cl, 0, 0, 0, cl, cl, cl, cl],
         z=[0, 0, 0, 0, 0, ch, ch, ch, ch, ch, ch, 0, 0, ch, ch, 0],
         mode='lines', line=dict(color='black', width=4),
-        name=f"ตู้ {container['Container_Name']}"
+        name=f"Container {container['Container_Name']}"
     ))
 
     for b in placed_boxes:
@@ -231,14 +276,14 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
         fig.add_trace(go.Scatter3d(
             x=[cg_x], y=[cg_y], z=[ch / 2],
             mode='markers', marker=dict(size=10, color='red', symbol='diamond'),
-            name='จุด CG สะสม'
+            name='Accumulated CG Point'
         ))
 
     fig.update_layout(
         scene=dict(
-            xaxis=dict(title='X: กว้าง (cm)', range=[0, cw]),
-            yaxis=dict(title='Y: ยาว (cm)', range=[0, cl]),
-            zaxis=dict(title='Z: สูง (cm)', range=[0, ch]),
+            xaxis=dict(title='X: Width (cm)', range=[0, cw]),
+            yaxis=dict(title='Y: Length (cm)', range=[0, cl]),
+            zaxis=dict(title='Z: Height (cm)', range=[0, ch]),
             aspectmode='data'
         ),
         margin=dict(r=0, l=0, b=0, t=10), height=650
@@ -251,7 +296,7 @@ def plot_interactive_container(container, placed_boxes, cg_x, cg_y):
 CONTAINER_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=0&single=true&output=csv"
 BOX_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRFS2SNdgb2nBPQnwkyJRTGf2_9syexHsC3asjnkjhJOStVapomghBi9Ew9g5sYfohVoKVdghKajuCH/pub?gid=1420125949&single=true&output=csv"
 
-@st.cache_data(ttl=5) # ลดเวลา TTL เหลือ 5 วินาทีเพื่อให้ดึงข้อมูลใหม่เร็วขึ้น
+@st.cache_data(ttl=5)
 def load_master_data():
     try:
         df_c = pd.read_csv(CONTAINER_CSV_URL)
@@ -273,9 +318,10 @@ def load_master_data():
             }
         ])
         df_b = pd.DataFrame([
-            {'Box_ID': 'BOX-A', 'Box_Name': 'กล่อง A (อะไหล่หนัก)', 'Customer_Name': 'สมชาย', 'Width_cm': 40, 'Length_cm': 50, 'Height_cm': 30, 'Weight_kg': 85.0, 'Allow_X': 0, 'Allow_Y': 0, 'Allow_Z': 1, 'LBS_z': 300},
-            {'Box_ID': 'BOX-B', 'Box_Name': 'กล่อง B (อุปกรณ์)', 'Customer_Name': 'สมหญิง', 'Width_cm': 60, 'Length_cm': 80, 'Height_cm': 40, 'Weight_kg': 35.0, 'Allow_X': 1, 'Allow_Y': 1, 'Allow_Z': 1, 'LBS_z': 500},
-            {'Box_ID': 'BOX-C', 'Box_Name': 'กล่อง C (เครื่องใช้ไฟฟ้า)', 'Customer_Name': 'วิชัย', 'Width_cm': 50, 'Length_cm': 50, 'Height_cm': 60, 'Weight_kg': 25.0, 'Allow_X': 0, 'Allow_Y': 0, 'Allow_Z': 1, 'LBS_z': 200}
+            {'Box_ID': 'BOX-A', 'Box_Name': 'Box A (Parts)', 'Customer_Name': 'Somchai', 'Width_cm': 40, 'Length_cm': 50, 'Height_cm': 30, 'Weight_kg': 85.0, 'Allow_X': 0, 'Allow_Y': 0, 'Allow_Z': 1, 'LBS_z': 300},
+            {'Box_ID': 'BOX-B', 'Box_Name': 'Box B (Equipment)', 'Customer_Name': 'Somying', 'Width_cm': 60, 'Length_cm': 80, 'Height_cm': 40, 'Weight_kg': 35.0, 'Allow_X': 1, 'Allow_Y': 1, 'Allow_Z': 1, 'LBS_z': 500},
+            {'Box_ID': 'BOX-C', 'Box_Name': 'Pallet C (spare)', 'Customer_Name': 'BYD', 'Width_cm': 90, 'Length_cm': 115, 'Height_cm': 120, 'Weight_kg': 510.0, 'Allow_X': 0, 'Allow_Y': 0, 'Allow_Z': 1, 'LBS_z': 1500},
+            {'Box_ID': 'BOX-D', 'Box_Name': 'Pallet C (spare)', 'Customer_Name': 'Toyota', 'Width_cm': 90, 'Length_cm': 115, 'Height_cm': 100, 'Weight_kg': 510.0, 'Allow_X': 0, 'Allow_Y': 0, 'Allow_Z': 1, 'LBS_z': 300}
         ])
         return df_c, df_b
 
@@ -286,25 +332,24 @@ box_colors_map = assign_box_colors(df_box)
 # 7. APP MAIN INTERFACE (3 TABS)
 # ------------------------------------------------------------------------------
 tab_user, tab_reports, tab_admin = st.tabs([
-    "🚛 หน้าผู้ใช้งาน (3D Loading & LDD)", 
-    "📊 รายงานและส่งออกข้อมูล (Export CSV)", 
-    "⚙️ หน้า Admin (Master Data)"
+    "🚛 User View (3D Loading & LDD)", 
+    "📊 Reports & Export CSV", 
+    "⚙️ Admin (Master Data)"
 ])
 
 # --- SIDEBAR INPUTS ---
-st.sidebar.header("📋 เมนูเลือกตู้และสินค้า")
+st.sidebar.header("📋 Container & Cargo Selection")
 
-# ปุ่มกด Refresh บังคับล้าง Cache และโหลดใหม่ทันที
-if st.sidebar.button("🔄 อัปเดตข้อมูลจาก Google Sheet", use_container_width=True, type="primary"):
-    load_master_data.clear() # บังคับล้าง Cache ของฟังก์ชันอ่านข้อมูล
-    st.cache_data.clear()    # ล้าง Cache ทั้งหมดของ Streamlit
+if st.sidebar.button("🔄 Refresh Data from Google Sheet", use_container_width=True, type="primary"):
+    load_master_data.clear()
+    st.cache_data.clear()
     st.rerun()
 
-selected_container_name = st.sidebar.selectbox("เลือกประเภทตู้คอนเทนเนอร์:", df_container['Container_Name'].unique())
+selected_container_name = st.sidebar.selectbox("Select Container Type:", df_container['Container_Name'].unique())
 container_info = df_container[df_container['Container_Name'] == selected_container_name].iloc[0]
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("ระบุจำนวนกล่อง")
+st.sidebar.subheader("Specify Box Quantities")
 
 user_box_orders = []
 for _, box in df_box.iterrows():
@@ -313,7 +358,7 @@ for _, box in df_box.iterrows():
     if qty > 0:
         user_box_orders.append({'info': box, 'qty': qty})
 
-# Process DBL & LDD
+# Process DBL Algorithm & LDD
 placed_boxes, unfitted_boxes = run_dbl_algorithm(container_info, user_box_orders, box_colors_map)
 tot_w, cg_x, cg_y, f_axle, r_axle, f_limit, r_limit, ldd_pass = calculate_ldd(placed_boxes, container_info)
 
@@ -328,22 +373,22 @@ with tab_user:
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("📦 Volume Util.", f"{vol_utilization:.2f} %")
-    m2.metric("秤 Total Weight", f"{tot_w:,.1f} kg", f"พิกัด {container_info['Max_Weight_kg']:,.0f} kg ({weight_utilization:.1f}%)")
-    m3.metric("🎯 จุด CG (X, Y)", f"{cg_x:.0f}, {cg_y:.0f} cm")
-    m4.metric("🚛 LDD Status", "✅ ปลอดภัย" if ldd_pass else "⚠️ Overload")
+    m2.metric("⚖️ Total Weight", f"{tot_w:,.1f} kg", f"Limit {container_info['Max_Weight_kg']:,.0f} kg ({weight_utilization:.1f}%)")
+    m3.metric("🎯 CG Point (X, Y)", f"{cg_x:.0f}, {cg_y:.0f} cm")
+    m4.metric("🚛 LDD Status", "✅ Safe" if ldd_pass else "⚠️ Overload")
 
-    st.markdown("### 🚛 น้ำหนักกดลงเพลารถ (Load Distribution Diagram)")
+    st.markdown("### 🚛 Load Distribution Diagram (Axle Weights)")
     ldd_col1, ldd_col2 = st.columns(2)
     with ldd_col1:
         if f_axle <= f_limit:
-            st.success(f"**เพลาหน้า:** {f_axle:,.1f} kg / พิกัด {f_limit:,.0f} kg — ผ่านมาตรฐาน")
+            st.success(f"**Front Axle:** {f_axle:,.1f} kg / Limit {f_limit:,.0f} kg — Passed")
         else:
-            st.error(f"**เพลาหน้า:** {f_axle:,.1f} kg / พิกัด {f_limit:,.0f} kg — ⚠️ เกินพิกัด!")
+            st.error(f"**Front Axle:** {f_axle:,.1f} kg / Limit {f_limit:,.0f} kg — ⚠️ Overloaded!")
     with ldd_col2:
         if r_axle <= r_limit:
-            st.success(f"**เพลาหลัง:** {r_axle:,.1f} kg / พิกัด {r_limit:,.0f} kg — ผ่านมาตรฐาน")
+            st.success(f"**Rear Axle:** {r_axle:,.1f} kg / Limit {r_limit:,.0f} kg — Passed")
         else:
-            st.error(f"**เพลาหลัง:** {r_axle:,.1f} kg / พิกัด {r_limit:,.0f} kg — ⚠️ เกินพิกัด!")
+            st.error(f"**Rear Axle:** {r_axle:,.1f} kg / Limit {r_limit:,.0f} kg — ⚠️ Overloaded!")
 
     st.markdown("---")
 
@@ -353,7 +398,7 @@ with tab_user:
         st.plotly_chart(fig, use_container_width=True)
 
     with col_legend:
-        st.subheader("🎨 สัญลักษณ์สี")
+        st.subheader("🎨 Color Legend")
         for item in user_box_orders:
             box = item['info']
             color = box_colors_map.get(box['Box_ID'], '#FF5733')
@@ -366,52 +411,52 @@ with tab_user:
 
 # --- TAB 2: REPORTS & EXPORT CSV ---
 with tab_reports:
-    st.title("📊 รายงานสรุปการจัดวางและส่งออกข้อมูล (CSV)")
+    st.title("📊 Loading Summary & CSV Export")
 
-    st.subheader("⚠️ 1. รายการกล่องที่ไม่สามารถใส่ลงตู้ได้ (Unfitted Boxes)")
+    st.subheader("⚠️ 1. Unfitted Boxes Report")
     if unfitted_boxes:
         df_unfitted = pd.DataFrame(unfitted_boxes)
-        st.warning(f"พบกล่องตกค้างทั้งหมด {sum(b['Unfitted_Qty'] for b in unfitted_boxes)} ใบ")
+        st.warning(f"Found {sum(b['Unfitted_Qty'] for b in unfitted_boxes)} box(es) that could not fit into the container.")
         st.dataframe(df_unfitted, use_container_width=True)
         
         csv_unfitted = df_unfitted.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
-            label="📥 ดาวน์โหลดรายการกล่องตกค้าง (CSV)",
+            label="📥 Download Unfitted Boxes Report (CSV)",
             data=csv_unfitted,
             file_name="unfitted_boxes_report.csv",
             mime="text/csv"
         )
     else:
-        st.success("🎉 สินค้าทั้งหมดสามารถจัดวางลงในตู้ได้ครบถ้วน!")
+        st.success("🎉 All requested boxes have been placed successfully!")
 
     st.markdown("---")
 
-    st.subheader("📍 2. รายการตำแหน่งพิกัด 3D ของกล่องในตู้ (Placed Boxes Positions)")
+    st.subheader("📍 2. Placed Boxes 3D Coordinates")
     if placed_boxes:
         df_placed = pd.DataFrame(placed_boxes)
         display_cols = ['Box_ID', 'Box_Name', 'Customer_Name', 'x1', 'y1', 'z1', 'x2', 'y2', 'z2', 'Width_cm', 'Length_cm', 'Height_cm', 'weight_kg']
         df_placed_display = df_placed[display_cols]
         
-        st.write(f"จำนวนกล่องที่บรรจุได้สำเร็จ: **{len(placed_boxes)}** ใบ")
+        st.write(f"Total placed boxes: **{len(placed_boxes)}** units.")
         st.dataframe(df_placed_display, use_container_width=True)
 
         csv_placed = df_placed_display.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
-            label="📥 ดาวน์โหลดพิกัดการจัดวางตู้ 3D (CSV)",
+            label="📥 Download 3D Placement Coordinates (CSV)",
             data=csv_placed,
             file_name="placed_boxes_positions.csv",
             mime="text/csv"
         )
 
-# --- TAB 3: ADMIN MANAGEMENT (READ-ONLY WITHOUT PASSWORD) ---
+# --- TAB 3: ADMIN MANAGEMENT ---
 with tab_admin:
-    st.title("⚙️ ข้อมูล Master Data ที่อ่านได้จาก Google Sheets")
-    st.caption("หน้านี้แสดงค่าตัวเลขจริงที่อ่านมาจาก Google Sheets แบบ Real-time (ไม่ต้องใช้รหัสผ่าน)")
+    st.title("⚙️ Master Data (Google Sheets Real-Time)")
+    st.caption("This tab displays live data read directly from Google Sheets in real-time.")
 
-    st.subheader("1. ตารางข้อมูลตู้คอนเทนเนอร์ (Container Master Table)")
+    st.subheader("1. Container Master Table")
     st.dataframe(df_container, use_container_width=True)
     
-    st.subheader("2. ตารางข้อมูลกล่องสินค้า (Box Master Table)")
+    st.subheader("2. Box Master Table")
     st.dataframe(df_box, use_container_width=True)
 
-    st.info("💡 หากมีการแก้ไขค่าใน Google Sheet ให้กดปุ่ม **'🔄 อัปเดตข้อมูลจาก Google Sheet'** ที่แถบเมนูด้านซ้ายเพื่ออ่านค่าใหม่")
+    st.info("💡 If you update data in Google Sheets, click **'🔄 Refresh Data from Google Sheet'** in the left sidebar.")
